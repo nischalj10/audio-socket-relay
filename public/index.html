@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Audio WebSocket Demo</title>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+  </head>
+  <body>
+    <button id="startRecording">Start Recording</button>
+    <button id="stopRecording">Stop Recording</button>
+
+    <script>
+      const socket = io('ws://localhost:3000', {
+        transports: ['websocket'],
+      });
+      let audioContext;
+      let mediaStreamSource;
+      let processor;
+      let stream;
+
+      async function initAudio() {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 16000,
+        });
+      }
+
+      document.getElementById('startRecording').onclick = async () => {
+        if (!audioContext) await initAudio();
+
+        // Get microphone stream
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+          },
+        });
+
+        // Set up audio processing pipeline
+        mediaStreamSource = audioContext.createMediaStreamSource(stream);
+        processor = audioContext.createScriptProcessor(1024, 1, 1);
+
+        mediaStreamSource.connect(processor);
+        processor.connect(audioContext.destination);
+
+        // Process and send audio data
+        processor.onaudioprocess = (e) => {
+          const inputData = e.inputBuffer.getChannelData(0);
+          // Convert float32 to int16
+          const int16Data = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            int16Data[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7fff;
+          }
+          socket.emit('sendAudioToServer', int16Data.buffer);
+        };
+      };
+
+      document.getElementById('stopRecording').onclick = () => {
+        if (processor) {
+          processor.disconnect();
+          mediaStreamSource.disconnect();
+          stream.getTracks().forEach((track) => track.stop());
+          processor = null;
+          mediaStreamSource = null;
+          stream = null;
+        }
+      };
+
+      // Receive and play relayed audio
+      socket.on('sendAudioToClient', async (audioChunk) => {
+        if (!audioContext) await initAudio();
+
+        try {
+          // Convert the ArrayBuffer to Int16Array first
+          const int16Array = new Int16Array(audioChunk);
+
+          // Create an audio buffer using the actual array length
+          const audioBuffer = audioContext.createBuffer(
+            1,
+            int16Array.length,
+            16000
+          );
+          const channelData = audioBuffer.getChannelData(0);
+
+          // Convert Int16 back to Float32
+          for (let i = 0; i < int16Array.length; i++) {
+            channelData[i] = int16Array[i] / 0x7fff;
+          }
+
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContext.destination);
+          source.start(0);
+        } catch (error) {
+          console.error(
+            'Error playing audio:',
+            error,
+            'Chunk size:',
+            audioChunk.byteLength
+          );
+        }
+      });
+    </script>
+  </body>
+</html>
